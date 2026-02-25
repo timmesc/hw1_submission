@@ -31,8 +31,11 @@ import json
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 from tqdm import tqdm
-import pygame
-from q2 import repeated_forward_astar
+try:
+    import pygame  # type: ignore
+except ModuleNotFoundError:  # pragma: no cover
+    pygame = None
+from q2 import repeated_forward_astar, a_star_search, get_neighbors
 from constants import ROWS, START_NODE, END_NODE, BLACK, WHITE, GREY, YELLOW, BLUE, PATH, NODE_LENGTH, GRID_LENGTH, WINDOW_W, WINDOW_H, GAP
 from custom_pq import CustomPQ_maxG
 
@@ -62,10 +65,88 @@ def adaptive_astar(
     goal: Tuple[int, int] = END_NODE,
     visualize_callbacks: Optional[Dict[str, Callable[[Tuple[int, int]], None]]] = None,
 ) -> Tuple[bool, List[Tuple[int, int]], int, int]:
-    
-    # TODO: Implement Adaptive A* with max_g tie-braking strategy.
-    # Use heapq for standard priority queue implementation and name your max_g heap class as `CustomPQ_maxG` and use it. 
-    pass
+
+    # Adaptive A* (replanning): same execution loop as repeated forward A*, but after each
+    # A* search we update h-values for expanded (closed) states:
+    #   h_new(s) = g(goal) - g(s)
+    # and reuse those h-values in subsequent searches.
+    size = ROWS
+
+    # agent knowledge: -1=unknown, 0=known free, 1=known blocked
+    known_grid = [[-1] * size for _ in range(size)]
+    known_grid[start[0]][start[1]] = 0
+    known_grid[goal[0]][goal[1]] = 0
+
+    counter = 0
+    g: Dict[Tuple[int, int], float] = {}
+    search_val: Dict[Tuple[int, int], int] = {}
+    h_values: Dict[Tuple[int, int], float] = {}
+
+    current = start
+    total_expanded = 0
+    trajectory: List[Tuple[int, int]] = [current]
+    num_searches = 0
+
+    cb_move = (visualize_callbacks or {}).get("on_move")
+
+    while current != goal:
+        # observe neighbors
+        for n in get_neighbors(current, size):
+            known_grid[n[0]][n[1]] = actual_maze[n[0]][n[1]]
+
+        # A* search with adaptive h-values
+        counter += 1
+        num_searches += 1
+        path, expanded, closed_list = a_star_search(
+            known_grid=known_grid,
+            start=current,
+            goal=goal,
+            size=size,
+            tie_breaking="max_g",
+            counter=counter,
+            g=g,
+            search_val=search_val,
+            h_values=h_values,
+            return_closed=True,
+        )
+        total_expanded += expanded
+
+        if path is None:
+            return False, trajectory, total_expanded, num_searches
+
+        # update adaptive heuristic for states expanded in this search
+        goal_cost = g.get(goal, float("inf"))
+        if goal_cost != float("inf"):
+            for s in closed_list:
+                gs = g.get(s, float("inf"))
+                if gs != float("inf"):
+                    h_values[s] = goal_cost - gs
+
+        # follow the path until blocked or goal
+        for i in range(1, len(path)):
+            current = path[i]
+            trajectory.append(current)
+            if cb_move is not None:
+                cb_move(current)
+
+            if current == goal:
+                return True, trajectory, total_expanded, num_searches
+
+            # observe from new position
+            for n in get_neighbors(current, size):
+                known_grid[n[0]][n[1]] = actual_maze[n[0]][n[1]]
+
+            # check if remaining path is blocked by known blocked cells
+            path_blocked = False
+            for j in range(i + 1, len(path)):
+                r, c = path[j]
+                if known_grid[r][c] == 1:
+                    path_blocked = True
+                    break
+            if path_blocked:
+                break
+
+    return True, trajectory, total_expanded, num_searches
 
 def show_astar_search(win: pygame.Surface, actual_maze: List[List[int]], algo: str, fps: int = 240, step_delay_ms: int = 0, save_path: Optional[str] = None) -> None:
     # [BONUS] TODO: Place your visualization code here.
@@ -125,7 +206,7 @@ def main() -> None:
             actual_maze=mazes[maze_id],
             start=START_NODE,
             goal=END_NODE,
-            tie_braking="max_g",
+            tie_breaking="max_g",
         )
         t1 = time.perf_counter()
 
@@ -140,6 +221,8 @@ def main() -> None:
         results.append(entry)
 
     if args.show_vis:
+        if pygame is None:
+            raise RuntimeError("pygame is not installed; run without --show_vis")
         # In case, PyGame is used for visualization, this code initializes a window and runs the visualization for the selected maze and algorithm.
         # Feel free to modify this code if you use a different visualization library or approach.
         pygame.init()
