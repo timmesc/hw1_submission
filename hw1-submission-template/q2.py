@@ -29,7 +29,7 @@ from __future__ import annotations
 import heapq
 import argparse
 import json
-from time import time
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 from tqdm import tqdm
 import pygame
@@ -54,34 +54,185 @@ def readMazes(fname: str) -> List[List[List[int]]]:
         mazes.append(maze)
     return mazes
 
+
+# ---- helper functions (also used by q3 and q5) ----
+
+def manhattan_distance(cell, goal):
+    """Manhattan distance heuristic"""
+    return abs(cell[0] - goal[0]) + abs(cell[1] - goal[1])
+
+
+def get_neighbors(cell, size):
+    """Return valid neighboring cells (N, S, W, E)"""
+    row, col = cell
+    neighbors = []
+    for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        nr, nc = row + dr, col + dc
+        if 0 <= nr < size and 0 <= nc < size:
+            neighbors.append((nr, nc))
+    return neighbors
+
+
+def a_star_search(known_grid, start, goal, size, tie_breaking, counter, g, search_val,
+                  h_values=None, return_closed=False):
+    """
+    Single A* search on agent's known grid.
+    Returns (path, expanded) or (path, expanded, closed_list) if return_closed=True.
+    """
+    g[start] = 0
+    search_val[start] = counter
+    g[goal] = float('inf')
+    search_val[goal] = counter
+
+    tree = {}
+    closed_set = set()
+    closed_list = []
+
+    # pick the right pq for tie-breaking
+    if tie_breaking == "max_g":
+        pq = CustomPQ_maxG()
+    else:
+        pq = CustomPQ_minG()
+
+    def h_of(cell):
+        # use adaptive heuristic if available, otherwise manhattan
+        if h_values is not None and cell in h_values:
+            return h_values[cell]
+        return manhattan_distance(cell, goal)
+
+    h = h_of(start)
+    pq.push(h, 0, start)
+
+    expanded = 0
+
+    while not pq.is_empty():
+        f_val, g_val, s = pq.pop()
+
+        if s in closed_set:
+            continue
+
+        # goal found, dont count as expanded
+        if s == goal:
+            break
+
+        closed_set.add(s)
+        closed_list.append(s)
+        expanded += 1
+
+        for neighbor in get_neighbors(s, size):
+            if known_grid[neighbor[0]][neighbor[1]] == 1:
+                continue
+            if neighbor in closed_set:
+                continue
+
+            # counter trick: init g if not seen in this search
+            if search_val.get(neighbor, 0) < counter:
+                g[neighbor] = float('inf')
+                search_val[neighbor] = counter
+
+            new_g = g[s] + 1
+            if new_g < g[neighbor]:
+                g[neighbor] = new_g
+                tree[neighbor] = s
+                h = h_of(neighbor)
+                f = new_g + h
+                pq.push(f, new_g, neighbor)
+
+    # no path found
+    if g[goal] == float('inf'):
+        if return_closed:
+            return None, expanded, closed_list
+        return None, expanded
+
+    # reconstruct path
+    path = []
+    current = goal
+    while current != start:
+        path.append(current)
+        current = tree[current]
+    path.append(start)
+    path.reverse()
+
+    if return_closed:
+        return path, expanded, closed_list
+    return path, expanded
+
+
 def repeated_forward_astar(
     actual_maze: List[List[int]],
     start: Tuple[int, int] = START_NODE,
     goal: Tuple[int, int] = END_NODE,
-    tie_breaking: str = "max_g", # "min_g"
+    tie_breaking: str = "max_g",
     visualize_callbacks: Optional[Dict[str, Callable[[Tuple[int, int]], None]]] = None,
 ) -> Tuple[bool, List[Tuple[int, int]], int, int]:
-    
-    # TODO: Implement Repeated Forward A* with min_g & max_g tie-braking strategies.
-    # Use heapq for standard priority queue implementation and name your max_g heap class as `CustomPQ_maxG` 
-    # and min_g heap class as `CustomPQ_minG`. Place them inside `custom_pq.py` file (see import statement in line 41).
-    # and use it. 
-    pass
+    """
+    Repeated Forward A*: plan with A*, move along path,
+    replan when blocked cells discovered.
+    Returns (found, executed_path, total_expanded, num_replans)
+    """
+    size = ROWS
+
+    # agent's knowledge: -1=unknown, 0=known free, 1=known blocked
+    known_grid = [[-1] * size for _ in range(size)]
+    known_grid[start[0]][start[1]] = 0
+    known_grid[goal[0]][goal[1]] = 0
+
+    counter = 0
+    g = {}
+    search_val = {}
+
+    current = start
+    total_expanded = 0
+    trajectory = [current]
+    num_searches = 0
+
+    while current != goal:
+        # observe neighbors
+        for n in get_neighbors(current, size):
+            known_grid[n[0]][n[1]] = actual_maze[n[0]][n[1]]
+
+        # run A*
+        counter += 1
+        num_searches += 1
+        path, expanded = a_star_search(
+            known_grid, current, goal, size, tie_breaking, counter, g, search_val
+        )
+        total_expanded += expanded
+
+        if path is None:
+            return False, trajectory, total_expanded, num_searches
+
+        # follow the path until blocked or goal
+        for i in range(1, len(path)):
+            next_cell = path[i]
+            current = next_cell
+            trajectory.append(current)
+
+            if current == goal:
+                return True, trajectory, total_expanded, num_searches
+
+            # observe from new position
+            for n in get_neighbors(current, size):
+                known_grid[n[0]][n[1]] = actual_maze[n[0]][n[1]]
+
+            # check if remaining path is blocked
+            path_blocked = False
+            for j in range(i + 1, len(path)):
+                if known_grid[path[j][0]][path[j][1]] == 1:
+                    path_blocked = True
+                    break
+
+            if path_blocked:
+                break
+
+    return True, trajectory, total_expanded, num_searches
+
 
 def show_astar_search(win: pygame.Surface, actual_maze: List[List[int]], algo: str, fps: int = 240, step_delay_ms: int = 0, save_path: Optional[str] = None) -> None:
     # [BONUS] TODO: Place your visualization code here.
-    # This function should display the maze used, the agent's knowledge, and the search process as the agent plans and executes.
-    # As a reference, this function takes pygame Surface 'win' to draw on, the actual maze grid, the algorithm name for labeling, 
-    # and optional parameters for controlling the visualization speed and saving a screenshot.
-    # You are free to use other visualization libraries other than pygame. 
-    # You can call repeated_forward_astar with visualize_callbacks that update the Pygame display as the agent plans and executes.
-    # In the end it should store the visualization as a PNG file if save_path is provided, or default to "vis_{algo}.png".
-    # print(f"[{algo}] found={found}  executed_steps={len(executed)-1}  expanded={expanded}  replans={replans}")
-
     if save_path is None:
         save_path = f"vis_{algo}.png"
 
-    # If 'win' is the display surface (it is), this works:
     pygame.image.save(win, save_path)
     print(f"Saved the visualization -> {save_path}")
 
@@ -113,7 +264,7 @@ def main() -> None:
                 actual_maze=mazes[maze_id],
                 start=START_NODE,
                 goal=END_NODE,
-                tie_breaking=args.tie_braking
+                tie_breaking="max_g"
             )
             t1 = time.perf_counter()
 
@@ -131,7 +282,7 @@ def main() -> None:
                 actual_maze=mazes[maze_id],
                 start=START_NODE,
                 goal=END_NODE,
-                tie_breaking=args.tie_braking
+                tie_breaking="min_g"
             )
             t1 = time.perf_counter()
 
@@ -146,8 +297,6 @@ def main() -> None:
         results.append(entry)
 
     if args.show_vis:
-        # In case, PyGame is used for visualization, this code initializes a window and runs the visualization for the selected maze and algorithm.
-        # Feel free to modify this code if you use a different visualization library or approach.
         pygame.init()
         win = pygame.display.set_mode((WINDOW_W, WINDOW_H))
         pygame.display.set_caption("Repeated Forward A* Visualization")
